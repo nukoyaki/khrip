@@ -1,0 +1,27 @@
+{
+  "name": "khrip",
+  "version": "0.0.0",
+  "description": "",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nukoyaki/khrip.git"
+  },
+  "keywords": [
+    "khinsider"
+  ],
+  "author": "nukoyaki",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/nukoyaki/khrip/issues"
+  },
+  "homepage": "https://github.com/nukoyaki/khrip#readme",
+  "dependencies": {
+    "filenamify": "^7.0.3",
+    "jsdom": "^30.1.1",
+    "p-limit": "^7.3.3"
+  }
+}
