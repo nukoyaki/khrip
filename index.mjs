@@ -1,16 +1,23 @@
+import { chromium } from "playwright";
 import { JSDOM } from "jsdom";
 import fs from "fs";
-import https from "https";
 import { join } from "node:path";
 import filenamify from "filenamify";
 import pLimit from "p-limit";
 
 const commandLineArguments = process.argv.slice(2);
 const downloadAlbum = commandLineArguments[0];
-const folderPath = join("khinsider", getFilesystemName(downloadAlbum));
+
+if (!downloadAlbum) {
+	console.error("please provide khinsider album URL");
+	process.exit(1);
+}
+
+const folderName = decodeURIComponent(downloadAlbum.split("/").pop());
+const folderPath = join("khinsider", folderName);
 
 console.log("creating folder");
-fs.mkdirSync(folderPath);
+fs.mkdirSync(folderPath, { recursive: true });
 
 const preferredFormats = ["flac", "wav", "ogg", "m4a", "mp3"];
 
@@ -20,104 +27,46 @@ function toArray(weirdShit) {
 
 function getFileExtension(link) {
 	const lastDotIndex = link.lastIndexOf(".");
-	if (lastDotIndex === -1) {
-		return ""; // No extension found
-	}
-	return link.substring(lastDotIndex + 1);
+	return lastDotIndex === -1 ? "" : link.substring(lastDotIndex + 1);
 }
 
 function getFilesystemName(link) {
 	link = decodeURIComponent(link);
-
 	const lastSlashIndex = link.lastIndexOf("/");
-	if (lastSlashIndex === -1) {
-		return "unknown"; // No name found
+	return lastSlashIndex === -1
+		? "unknown"
+		: link.substring(lastSlashIndex + 1);
+}
+
+(async () => {
+	console.log("launching browser");
+	const browser = await chromium.launch({ headless: true });
+	const context = await browser.newContext({
+		userAgent:
+			"Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0",
+	});
+	const page = await context.newPage();
+
+	console.log(`fetching tracks from ${downloadAlbum}`);
+	await page.goto(downloadAlbum, { waitUntil: "domcontentloaded" });
+
+	try {
+		await page.waitForSelector("#songlist", { timeout: 15000 });
+	} catch (e) {
+		console.error(
+			"waiting for #songlist timed out, the script was either detected as a bot or the page layout changed",
+		);
+		await browser.close();
+		process.exit(1);
 	}
-	return link.substring(lastSlashIndex + 1);
-}
 
-function downloadMetadata(downloadLink) {
-	return new Promise(async (resolve, reject) => {
-		const file = fs.createWriteStream(
-			join(folderPath, filenamify(getFilesystemName(downloadLink)))
-		);
-
-		https.get(downloadLink, (response) => {
-			response.pipe(file);
-
-			file.on("finish", () => {
-				file.close();
-				resolve();
-			});
-		});
-	});
-}
-
-let downloadedSongs = 0;
-let songsToDownload = 0;
-
-function downloadSong(downloadLink) {
-	return new Promise(async (resolve, reject) => {
-		const document = new JSDOM(await (await fetch(downloadLink)).text(), {
-			url: downloadLink,
-		}).window.document;
-
-		const formats = {};
-		toArray(document.getElementsByClassName("songDownloadLink")).forEach(
-			(download) => {
-				formats[getFileExtension(download.parentNode.href)] =
-					download.parentNode.href;
-			}
-		);
-
-		let formatToUse = undefined;
-
-		for (const format of preferredFormats) {
-			if (formatToUse === undefined && formats[format] !== undefined) {
-				formatToUse = format;
-				break;
-			}
-		}
-
-		if (!formatToUse) {
-			reject(
-				`unable to resolve formatToUse from preferredFormats, got formats: ${formats}`
-			);
-		}
-
-		const file = fs.createWriteStream(
-			join(
-				folderPath,
-				filenamify(getFilesystemName(formats[formatToUse]))
-			)
-		);
-
-		https.get(formats[formatToUse], (response) => {
-			response.pipe(file);
-
-			file.on("finish", () => {
-				downloadedSongs++;
-				console.log(
-					`downloading songs (${downloadedSongs}/${songsToDownload})`
-				);
-
-				file.close();
-				resolve();
-			});
-		});
-	});
-}
-
-console.log(`fetching tracks from ${downloadAlbum}`);
-
-fetch(downloadAlbum).then(async (fetched) => {
-	const document = new JSDOM(await fetched.text(), {
-		url: downloadAlbum,
-	}).window.document;
+	const albumHtml = await page.content();
+	const document = new JSDOM(albumHtml, { url: downloadAlbum }).window
+		.document;
 
 	const trackListTableElements = toArray(
 		document.getElementById("songlist").getElementsByTagName("tbody")[0]
-			.children
+			.children,
 	);
 
 	const downloadPageLinks = [];
@@ -125,13 +74,15 @@ fetch(downloadAlbum).then(async (fetched) => {
 	trackListTableElements
 		.slice(
 			1, // cut off the header
-			trackListTableElements.length - 1 // cut off the footer
+			trackListTableElements.length - 1, // cut off the footer
 		)
 		.forEach((track) => {
-			downloadPageLinks.push(
-				track.getElementsByClassName("playlistDownloadSong")[0]
-					.childNodes[0].href
-			);
+			const playlistDownloadSong = track.getElementsByClassName(
+				"playlistDownloadSong",
+			)[0];
+			if (playlistDownloadSong && playlistDownloadSong.childNodes[0]) {
+				downloadPageLinks.push(playlistDownloadSong.childNodes[0].href);
+			}
 		});
 
 	console.log(`got ${downloadPageLinks.length} track(s) to download`);
@@ -141,13 +92,38 @@ fetch(downloadAlbum).then(async (fetched) => {
 
 	console.log("downloading metadata");
 
+	async function downloadFile(url, outputPath) {
+		const response = await page.request.get(url);
+		const buffer = await response.body();
+		fs.writeFileSync(outputPath, buffer);
+	}
+
 	for (const albumArt of document.getElementsByClassName("albumImage")) {
-		metadataInput.push(downloadLimit(() => downloadMetadata(albumArt.children[0].href)));
+		const artUrl = albumArt.children[0]?.href;
+		if (artUrl) {
+			metadataInput.push(
+				downloadLimit(async () => {
+					const outputPath = join(
+						folderPath,
+						filenamify(getFilesystemName(artUrl)),
+					);
+					await downloadFile(artUrl, outputPath);
+				}),
+			);
+		}
 	}
 
 	for (const link of document.getElementsByTagName("a")) {
 		if (link.href.match("khinsider.info.txt")) {
-			metadataInput.push(downloadLimit(() => downloadMetadata(link.href)));
+			metadataInput.push(
+				downloadLimit(async () => {
+					const outputPath = join(
+						folderPath,
+						filenamify(getFilesystemName(link.href)),
+					);
+					await downloadFile(link.href, outputPath);
+				}),
+			);
 		}
 	}
 
@@ -155,15 +131,62 @@ fetch(downloadAlbum).then(async (fetched) => {
 
 	console.log("downloading songs");
 
+	let downloadedSongs = 0;
+	const songsToDownload = downloadPageLinks.length;
 	const limitInput = [];
 
-	songsToDownload = downloadPageLinks.length;
+	for (const trackLink of downloadPageLinks) {
+		limitInput.push(
+			downloadLimit(async () => {
+				const songPageResponse = await page.request.get(trackLink);
+				const songPageHtml = await songPageResponse.text();
 
-	for (const track of downloadPageLinks) {
-		limitInput.push(downloadLimit(() => downloadSong(track)));
+				const songDoc = new JSDOM(songPageHtml, { url: trackLink })
+					.window.document;
+
+				const formats = {};
+				toArray(
+					songDoc.getElementsByClassName("songDownloadLink"),
+				).forEach((download) => {
+					const href = download.parentNode.href;
+					formats[getFileExtension(href)] = href;
+				});
+
+				let formatToUse = undefined;
+				for (const format of preferredFormats) {
+					if (
+						formatToUse === undefined &&
+						formats[format] !== undefined
+					) {
+						formatToUse = format;
+						break;
+					}
+				}
+
+				if (!formatToUse) {
+					throw new Error(
+						`unable to resolve format for track: ${trackLink}`,
+					);
+				}
+
+				const songFileUrl = formats[formatToUse];
+				const outputPath = join(
+					folderPath,
+					filenamify(getFilesystemName(songFileUrl)),
+				);
+
+				await downloadFile(songFileUrl, outputPath);
+
+				downloadedSongs++;
+				console.log(
+					`downloading songs (${downloadedSongs}/${songsToDownload})`,
+				);
+			}),
+		);
 	}
 
 	await Promise.all(limitInput);
 
 	console.log("downloaded songs");
-});
+	await browser.close();
+})();

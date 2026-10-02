@@ -22,6 +22,7 @@
   "dependencies": {
     "filenamify": "^7.0.3",
     "jsdom": "^30.1.1",
-    "p-limit": "^7.3.3"
+    "p-limit": "^7.3.3",
+    "playwright": "^1.63.0"
   }
 }
